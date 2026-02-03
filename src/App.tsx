@@ -1,6 +1,6 @@
 // Writers Voice - Voice Journey Application
 import { useEffect } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, Link, useLocation } from 'react-router-dom';
 import { useProgressStore } from './store/useProgressStore';
 import { VoiceModule } from './components/Dashboard/VoiceModule';
 import { StonePhase } from './phases/StonePhase';
@@ -75,17 +75,20 @@ export default function App() {
 }
 
 function NavLink({ to, label }: { to: string; label: string }) {
+  const location = useLocation();
+  const isActive = location.pathname === to ||
+    (to.startsWith('/phase/') && location.pathname.startsWith('/phase/'));
+
   return (
-    <a
-      href={to}
-      className="px-3 py-1.5 text-sm text-slate-400 hover:text-white transition-colors rounded-lg hover:bg-slate-700/50"
-      onClick={(e) => {
-        e.preventDefault();
-        window.history.pushState({}, '', to);
-        window.dispatchEvent(new PopStateEvent('popstate'));
-      }}
+    <Link
+      to={to}
+      className={`px-3 py-1.5 text-sm transition-colors rounded-lg ${
+        isActive
+          ? 'text-amber-500 bg-amber-500/10'
+          : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
+      }`}
     >
       {label}
-    </a>
+    </Link>
   );
 }
