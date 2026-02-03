@@ -1,5 +1,6 @@
 // Blue.cc Core Service
 // GraphQL client and authentication management
+// Based on Blue.cc API schema: Company → Project → TodoList hierarchy
 
 import { GraphQLClient } from 'graphql-request';
 import type { BlueConfig, ApiResponse, TodoList, Todo } from './types';
@@ -10,7 +11,8 @@ const DEFAULT_ENDPOINT = 'https://api.blue.cc/graphql';
 class BlueCoreService {
   private client: GraphQLClient | null = null;
   private config: BlueConfig | null = null;
-  private workspaceId: string | null = null;
+  private companyId: string | null = null;
+  private projectId: string | null = null;
   private journeyListId: string | null = null;
   private booksListId: string | null = null;
   private cohortListId: string | null = null;
@@ -52,6 +54,20 @@ class BlueCoreService {
   }
 
   /**
+   * Set company and project headers for subsequent requests
+   */
+  private setContextHeaders(): void {
+    if (!this.client) return;
+
+    if (this.companyId) {
+      this.client.setHeader('X-Bloo-Company-ID', this.companyId);
+    }
+    if (this.projectId) {
+      this.client.setHeader('X-Bloo-Project-ID', this.projectId);
+    }
+  }
+
+  /**
    * Execute a GraphQL query/mutation
    */
   async query<T>(
@@ -60,6 +76,7 @@ class BlueCoreService {
   ): Promise<ApiResponse<T>> {
     try {
       const client = this.getClient();
+      this.setContextHeaders();
       const data = await client.request<T>(query, variables);
       return { success: true, data };
     } catch (error) {
@@ -73,15 +90,19 @@ class BlueCoreService {
 
   /**
    * Ensure workspace exists and get/create required lists
+   * Blue.cc hierarchy: Company → Project → TodoList
    */
   async ensureWorkspace(): Promise<ApiResponse<{ workspaceId: string }>> {
-    // Get current user's workspace
+    // Step 1: Get Company and Project from recentProjects
     const workspaceQuery = `
-      query GetWorkspace {
-        me {
+      query GetRecentProjects {
+        recentProjects {
           id
-          workspaces {
+          uid
+          name
+          company {
             id
+            uid
             name
           }
         }
@@ -89,19 +110,31 @@ class BlueCoreService {
     `;
 
     const result = await this.query<{
-      me: { id: string; workspaces: Array<{ id: string; name: string }> };
+      recentProjects: Array<{
+        id: string;
+        uid: string;
+        name: string;
+        company: { id: string; uid: string; name: string };
+      }>;
     }>(workspaceQuery);
 
-    if (!result.success || !result.data?.me?.workspaces?.[0]) {
-      return { success: false, error: 'Could not retrieve workspace' };
+    if (!result.success || !result.data?.recentProjects?.[0]) {
+      return { success: false, error: 'Could not retrieve workspace. Make sure you have at least one project in Blue.cc.' };
     }
 
-    this.workspaceId = result.data.me.workspaces[0].id;
+    const project = result.data.recentProjects[0];
+    this.companyId = project.company.id;
+    this.projectId = project.id;
+
+    console.log('[Blue.cc] Workspace found:', {
+      company: project.company.name,
+      project: project.name,
+    });
 
     // Ensure required lists exist
     await this.ensureRequiredLists();
 
-    return { success: true, data: { workspaceId: this.workspaceId } };
+    return { success: true, data: { workspaceId: this.projectId } };
   }
 
   /**
@@ -114,7 +147,7 @@ class BlueCoreService {
    *
    * For Development:
    * - Lists are auto-created if not configured
-   * - Names follow pattern: BookArchitect_{Domain}
+   * - Names follow pattern: WritersVoice_{Domain}
    */
   private async ensureRequiredLists(): Promise<void> {
     // 1. Try to use configured IDs from environment/config (PREFERRED)
@@ -142,17 +175,19 @@ class BlueCoreService {
     console.warn('[Blue.cc] For production, set VITE_BLUE_*_LIST_ID environment variables');
 
     // 2. Otherwise, discover or create them
-    // Get existing lists
+    // Get existing lists for this project
     const listsQuery = `
-      query GetLists {
-        todoLists {
+      query GetTodoLists($projectId: String!) {
+        todoLists(projectId: $projectId) {
           id
           title
         }
       }
     `;
 
-    const result = await this.query<{ todoLists: TodoList[] }>(listsQuery);
+    const result = await this.query<{ todoLists: TodoList[] }>(listsQuery, {
+      projectId: this.projectId,
+    });
 
     if (!result.success || !result.data?.todoLists) {
       throw new Error('Could not retrieve todo lists');
@@ -162,32 +197,32 @@ class BlueCoreService {
 
     // Find or create Journey list if not configured
     if (!this.journeyListId) {
-        const journeyList = lists.find((l) => l.title === 'BookArchitect_VoiceJourneys');
-        if (journeyList) {
-          this.journeyListId = journeyList.id;
-        } else {
-          this.journeyListId = await this.createList('BookArchitect_VoiceJourneys');
-        }
+      const journeyList = lists.find((l) => l.title === 'WritersVoice_Journeys');
+      if (journeyList) {
+        this.journeyListId = journeyList.id;
+      } else {
+        this.journeyListId = await this.createList('WritersVoice_Journeys');
+      }
     }
 
     // Find or create Books list if not configured
     if (!this.booksListId) {
-        const booksList = lists.find((l) => l.title === 'BookArchitect_Books');
-        if (booksList) {
-          this.booksListId = booksList.id;
-        } else {
-          this.booksListId = await this.createList('BookArchitect_Books');
-        }
+      const booksList = lists.find((l) => l.title === 'WritersVoice_Books');
+      if (booksList) {
+        this.booksListId = booksList.id;
+      } else {
+        this.booksListId = await this.createList('WritersVoice_Books');
+      }
     }
 
     // Find or create Community list if not configured
     if (!this.cohortListId) {
-        const cohortList = lists.find((l) => l.title === 'BookArchitect_Community');
-        if (cohortList) {
-          this.cohortListId = cohortList.id;
-        } else {
-          this.cohortListId = await this.createList('BookArchitect_Community');
-        }
+      const cohortList = lists.find((l) => l.title === 'WritersVoice_Community');
+      if (cohortList) {
+        this.cohortListId = cohortList.id;
+      } else {
+        this.cohortListId = await this.createList('WritersVoice_Community');
+      }
     }
 
     console.log('[Blue.cc] Lists ready:', {
@@ -211,7 +246,10 @@ class BlueCoreService {
     `;
 
     const result = await this.query<{ createTodoList: { id: string } }>(mutation, {
-      input: { title },
+      input: {
+        title,
+        projectId: this.projectId,
+      },
     });
 
     if (!result.success || !result.data?.createTodoList?.id) {
@@ -317,15 +355,15 @@ class BlueCoreService {
    */
   async deleteTodo(todoId: string): Promise<ApiResponse<void>> {
     const mutation = `
-      mutation DeleteTodo($id: ID!) {
-        deleteTodo(id: $id) {
+      mutation DeleteTodo($input: DeleteTodoInput!) {
+        deleteTodo(input: $input) {
           id
         }
       }
     `;
 
     const result = await this.query<{ deleteTodo: { id: string } }>(mutation, {
-      id: todoId,
+      input: { todoId },
     });
 
     return { success: result.success };
@@ -377,6 +415,7 @@ class BlueCoreService {
 
   /**
    * Get connection status
+   * Uses recentProjects query as "me" query doesn't exist in Blue.cc schema
    */
   async checkConnection(): Promise<ApiResponse<{ connected: boolean; userId?: string }>> {
     if (!this.isInitialized()) {
@@ -385,19 +424,27 @@ class BlueCoreService {
 
     const query = `
       query CheckConnection {
-        me {
+        recentProjects {
           id
-          email
+          company {
+            id
+            name
+          }
         }
       }
     `;
 
-    const result = await this.query<{ me: { id: string; email: string } }>(query);
+    const result = await this.query<{
+      recentProjects: Array<{ id: string; company: { id: string; name: string } }>;
+    }>(query);
 
-    if (result.success && result.data?.me?.id) {
+    if (result.success && result.data?.recentProjects?.[0]) {
       return {
         success: true,
-        data: { connected: true, userId: result.data.me.id },
+        data: {
+          connected: true,
+          userId: result.data.recentProjects[0].company.id,
+        },
       };
     }
 
@@ -405,10 +452,17 @@ class BlueCoreService {
   }
 
   /**
-   * Get workspace ID
+   * Get project ID (workspace ID equivalent)
    */
   getWorkspaceId(): string | null {
-    return this.workspaceId;
+    return this.projectId;
+  }
+
+  /**
+   * Get company ID
+   */
+  getCompanyId(): string | null {
+    return this.companyId;
   }
 
   /**
@@ -417,7 +471,8 @@ class BlueCoreService {
   reset(): void {
     this.client = null;
     this.config = null;
-    this.workspaceId = null;
+    this.companyId = null;
+    this.projectId = null;
     this.journeyListId = null;
     this.booksListId = null;
     this.cohortListId = null;
