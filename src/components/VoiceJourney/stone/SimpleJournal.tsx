@@ -19,7 +19,6 @@ export function SimpleJournal({
 }: SimpleJournalProps) {
   const [content, setContent] = useState(initialValue);
   const [saved, setSaved] = useState(false);
-  const [sentenceCount, setSentenceCount] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const saveTimeoutRef = useRef<number | null>(null);
 
@@ -34,10 +33,8 @@ export function SimpleJournal({
     return (matches?.length || 0) + (hasTrailing ? 1 : 0);
   };
 
-  // Update sentence count when content changes
-  useEffect(() => {
-    setSentenceCount(countSentences(content));
-  }, [content]);
+  // Derive sentence count from content directly
+  const sentenceCount = countSentences(content);
 
   // Auto-save with debounce
   useEffect(() => {

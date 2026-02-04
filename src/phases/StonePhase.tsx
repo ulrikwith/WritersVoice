@@ -2,7 +2,7 @@
 // Focus: Learning the fundamental pattern through physical stone practice
 // Writing Allowed: NO - only 3-sentence daily reflections
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { Lock, Info, ChevronDown, ChevronUp } from 'lucide-react';
 import { StoneTimer, SimpleJournal, WeekProgress } from '../components/VoiceJourney/stone';
 import { useProgressStore } from '../store/useProgressStore';
@@ -17,11 +17,21 @@ export function StonePhase() {
   } = useProgressStore();
 
   const [showEducation, setShowEducation] = useState(false);
-  const [todayReflection, setTodayReflection] = useState('');
 
   const currentDay = getCurrentDay();
   const sessionsToday = getStoneSessionsToday();
   const daysRemaining = 7 - currentDay;
+
+  // Initialize today's reflection from existing sessions
+  const getInitialReflection = () => {
+    const today = new Date().toISOString().split('T')[0];
+    const todaySession = stoneSessionsLog.find(
+      (s) => s.date === today && s.reflection
+    );
+    return todaySession?.reflection || '';
+  };
+
+  const [todayReflection, setTodayReflection] = useState(getInitialReflection);
 
   // Calculate which days have been completed (had all sessions done)
   // Counts unique dates where user completed the daily goal
@@ -55,17 +65,6 @@ export function StonePhase() {
 
     return completed;
   }, [stoneSessionsLog, dailyStoneGoal, sessionsToday, currentDay]);
-
-  // Load today's reflection from stone sessions
-  useEffect(() => {
-    const today = new Date().toISOString().split('T')[0];
-    const todaySession = stoneSessionsLog.find(
-      (s) => s.date === today && s.reflection
-    );
-    if (todaySession?.reflection) {
-      setTodayReflection(todaySession.reflection);
-    }
-  }, [stoneSessionsLog]);
 
   const handleSessionComplete = (duration: number) => {
     completeStoneSession(duration, todayReflection || undefined);

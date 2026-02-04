@@ -19,8 +19,9 @@ interface BlueSettingsProps {
   onClose?: () => void;
 }
 
-export function BlueSettings(_: BlueSettingsProps) {
-  void _; // Suppress unused variable warning
+export function BlueSettings({ onClose: _onClose }: BlueSettingsProps) {
+  // onClose is optional - component can be embedded or used as modal
+  void _onClose; // Intentionally unused for now
   const {
     connectionStatus,
     connectionError,
@@ -34,29 +35,28 @@ export function BlueSettings(_: BlueSettingsProps) {
     syncAll,
   } = useBlueStore();
 
-  const [tokenId, setTokenId] = useState(config?.tokenId || '');
-  const [tokenSecret, setTokenSecret] = useState(config?.secretId || '');
+  // Initialize token values from config or environment
+  const getInitialTokenId = () => {
+    if (config?.tokenId) return config.tokenId;
+    const envTokenId = import.meta.env.VITE_BLUE_TOKEN_ID;
+    if (envTokenId && envTokenId !== 'your_blue_token_id') return envTokenId;
+    return '';
+  };
+
+  const getInitialTokenSecret = () => {
+    if (config?.secretId) return config.secretId;
+    const envTokenSecret = import.meta.env.VITE_BLUE_TOKEN_SECRET;
+    if (envTokenSecret && envTokenSecret !== 'your_blue_token_secret') return envTokenSecret;
+    return '';
+  };
+
+  const [tokenId, setTokenId] = useState(getInitialTokenId);
+  const [tokenSecret, setTokenSecret] = useState(getInitialTokenSecret);
   const [showSecret, setShowSecret] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [shouldAutoConnect, setShouldAutoConnect] = useState(false);
-
-  // Load from env on mount
-  useEffect(() => {
-    const envTokenId = import.meta.env.VITE_BLUE_TOKEN_ID;
-    const envTokenSecret = import.meta.env.VITE_BLUE_TOKEN_SECRET;
-
-    if (envTokenId && envTokenId !== 'your_blue_token_id') {
-      setTokenId(envTokenId);
-    }
-    if (envTokenSecret && envTokenSecret !== 'your_blue_token_secret') {
-      setTokenSecret(envTokenSecret);
-    }
-
-    // Check if we should auto-connect
-    if (config && connectionStatus === 'disconnected') {
-      setShouldAutoConnect(true);
-    }
-  }, [config, connectionStatus]);
+  const [shouldAutoConnect, setShouldAutoConnect] = useState(
+    () => Boolean(config && connectionStatus === 'disconnected')
+  );
 
   const handleConnect = async () => {
     if (!tokenId || !tokenSecret) {
@@ -86,11 +86,30 @@ export function BlueSettings(_: BlueSettingsProps) {
 
   // Handle auto-connect after handleConnect is defined
   useEffect(() => {
-    if (shouldAutoConnect && tokenId && tokenSecret) {
-      setShouldAutoConnect(false);
-      handleConnect();
-    }
-  }, [shouldAutoConnect, tokenId, tokenSecret]);
+    const autoConnect = async () => {
+      if (shouldAutoConnect && tokenId && tokenSecret) {
+        setShouldAutoConnect(false);
+        setIsConnecting(true);
+
+        const blueConfig: BlueConfig = {
+          tokenId,
+          secretId: tokenSecret,
+          journeyListId: import.meta.env.VITE_BLUE_JOURNEY_LIST_ID || undefined,
+          booksListId: import.meta.env.VITE_BLUE_BOOKS_LIST_ID || undefined,
+          cohortListId: import.meta.env.VITE_BLUE_COMMUNITY_LIST_ID || undefined,
+        };
+
+        const success = await connect(blueConfig);
+        if (success) {
+          await syncAll();
+        }
+
+        setIsConnecting(false);
+      }
+    };
+
+    autoConnect();
+  }, [shouldAutoConnect, tokenId, tokenSecret, connect, syncAll]);
 
   const handleDisconnect = () => {
     disconnect();

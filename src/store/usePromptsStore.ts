@@ -83,10 +83,10 @@ export const usePromptsStore = create<PromptsStore>()(
         const state = get();
         // Check if we need to reset daily prompts
         const today = getToday();
-        if ((state as any)._lastResetDate !== today) {
+        if (state._lastResetDate !== today) {
           set((s) => {
             s.promptsShownToday = [];
-            (s as any)._lastResetDate = today;
+            s._lastResetDate = today;
           });
         }
 
@@ -202,7 +202,7 @@ export const usePromptsStore = create<PromptsStore>()(
       resetDailyPrompts: () => {
         set((state) => {
           state.promptsShownToday = [];
-          (state as any)._lastResetDate = getToday();
+          state._lastResetDate = getToday();
         });
       },
 
@@ -230,7 +230,7 @@ export const usePromptsStore = create<PromptsStore>()(
         totalPromptsAnswered: state.totalPromptsAnswered,
         promptsEnabled: state.promptsEnabled,
         promptInterval: state.promptInterval,
-        _lastResetDate: (state as any)._lastResetDate,
+        _lastResetDate: state._lastResetDate,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);

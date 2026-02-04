@@ -67,7 +67,7 @@ const KEY_MAPPINGS = {
   wordCount: 'wc',
   synopsis: 'syn',
   content: 'cnt',
-  contentPreview: 'cp',
+  contentPreview: 'cpv',
   lastEditedAt: 'lea',
   bookId: 'bid',
 } as const;

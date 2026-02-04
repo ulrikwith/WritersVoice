@@ -23,7 +23,7 @@ import type {
 
 // Generate unique IDs
 const generateId = () =>
-  Date.now().toString() + '-' + Math.random().toString(36).substr(2, 9);
+  Date.now().toString() + '-' + Math.random().toString(36).substring(2, 11);
 
 // Get today's date in YYYY-MM-DD format
 const getToday = () => new Date().toISOString().split('T')[0];
@@ -326,10 +326,10 @@ export const useProgressStore = create<ProgressStore>()(
         const daysSinceStart = getDaysSinceStart(startDate);
         const newPhase = calculatePhase(daysSinceStart);
         const newUnlocks = calculateUnlocks(daysSinceStart);
-        const previousWeek = getCurrentWeek(
-          getDaysSinceStart(startDate) - 1
-        );
         const currentWeek = getCurrentWeek(daysSinceStart);
+        // Fix: previousWeek should be at least 1, not 0 (which happens on day 0)
+        const previousDays = Math.max(0, daysSinceStart - 1);
+        const previousWeek = getCurrentWeek(previousDays);
 
         // Check for feature unlocks
         const featureUnlocks = getNewUnlocks(previousWeek, currentWeek);

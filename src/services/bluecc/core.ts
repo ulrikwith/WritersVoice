@@ -465,8 +465,10 @@ class BlueCoreService {
   async searchTodos(
     listId: string,
     searchTerm: string,
-    _limit = 50
+    // limit param reserved for future server-side pagination
+    _limit?: number
   ): Promise<ApiResponse<Todo[]>> {
+    void _limit; // Currently unused - client-side filtering
     // Use todoList(id) pattern to fetch todos, then filter client-side
     const query = `
       query SearchTodos($todoListId: String!) {
@@ -520,8 +522,12 @@ class BlueCoreService {
    * Blue.cc uses todoList(id) query to get todos, not todos(todoListId)
    * Uses 'done' not 'completed'
    */
-  async getTodos(listId: string, _limit = 100): Promise<ApiResponse<Todo[]>> {
-    // Note: limit param ignored - todoList.todos doesn't support limit in this query pattern
+  async getTodos(
+    listId: string,
+    // limit param reserved for future server-side pagination
+    _limit?: number
+  ): Promise<ApiResponse<Todo[]>> {
+    void _limit; // Currently unused - API returns all todos
     const query = `
       query GetTodos($todoListId: String!) {
         todoList(id: $todoListId) {

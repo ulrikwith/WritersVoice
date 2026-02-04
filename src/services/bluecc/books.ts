@@ -159,13 +159,24 @@ class BooksService {
       }
     `;
 
+    const errors: string[] = [];
+
     for (let i = 0; i < bookIds.length; i++) {
-      await blueCore.query(mutation, {
+      const result = await blueCore.query(mutation, {
         input: {
           todoId: bookIds[i],
           position: i,
         },
       });
+
+      if (!result.success) {
+        errors.push(`Failed to reorder book ${bookIds[i]}: ${result.error || 'Unknown error'}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      console.error('[Blue.cc] Reorder errors:', errors);
+      return { success: false, error: errors.join('; ') };
     }
 
     return { success: true };

@@ -43,6 +43,18 @@ export function calculatePhase(daysSinceStart: number): Phase {
 
 /**
  * Calculate which features should be unlocked based on progress
+ *
+ * Note: This is the local UI unlock state. Blue.cc uses FEATURE_UNLOCK_SCHEDULE
+ * in services/bluecc/types.ts for cloud sync. Keep these schedules aligned:
+ *
+ * Week 2: textEditor (= basic-writing, micro-prompts, simple-reflection)
+ * Week 4: multipleChapters (= text-editing, multiple-chapters)
+ * Week 5: (cloud only: reflection-workspace, chapter-reordering)
+ * Week 6: (cloud only: community-features, peer-visibility)
+ * Week 7: fullChapterManagement, reflectionWorkspace (= advanced-prompts, resonance-tracking)
+ * Week 8: (cloud only: export-capabilities, publishing-prep)
+ * Week 10: communityFeatures, fullEditor, exportFeatures (= export-features)
+ * Week 12: (cloud only: full-autonomous-access)
  */
 export function calculateUnlocks(daysSinceStart: number): UnlockState {
   const week = getCurrentWeek(daysSinceStart);

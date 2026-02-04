@@ -111,6 +111,9 @@ export interface PromptsState {
 
   // Settings
   promptsEnabled: boolean;
+
+  // Internal: tracks last daily reset (YYYY-MM-DD format)
+  _lastResetDate: string;
 }
 
 // Computed helper types
