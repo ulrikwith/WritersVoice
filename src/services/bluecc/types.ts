@@ -65,15 +65,16 @@ export interface TodoList {
   id: string;
   title: string;
   projectId?: string;
-  createdAt: string;
-  updatedAt: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Todo {
   id: string;
   todoListId: string;
   title: string;
-  text?: string;
+  text?: string; // Description field - used for metadata storage
+  content?: string; // Legacy field
   completed: boolean;
   completedAt?: string;
   position: number;
@@ -89,7 +90,7 @@ export interface Todo {
 export interface CreateTodoInput {
   todoListId: string;
   title: string;
-  text?: string;
+  content?: string;
   parentId?: string;
   position?: number;
   tags?: string[];
@@ -98,7 +99,7 @@ export interface CreateTodoInput {
 export interface UpdateTodoInput {
   id: string;
   title?: string;
-  text?: string;
+  content?: string;
   completed?: boolean;
   position?: number;
   parentId?: string;

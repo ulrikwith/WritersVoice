@@ -1,8 +1,9 @@
 // Blue.cc Chapters Service
 // CRUD operations for chapters stored as child todos under books
+// Uses description-based metadata storage (PMT pattern) for reliable sync
 
 import blueCore from './core';
-import customFieldsService from './customFields';
+import { encodeMetadata, decodeMetadata } from './metadata';
 import type {
   ApiResponse,
   Chapter,
@@ -17,37 +18,13 @@ class ChaptersService {
    * Get all chapters for a book
    */
   async getChapters(bookId: string): Promise<ApiResponse<Chapter[]>> {
-    const query = `
-      query GetChapters($bookId: ID!) {
-        todo(id: $bookId) {
-          id
-          children {
-            id
-            title
-            text
-            position
-            createdAt
-            updatedAt
-            customFieldValues {
-              field {
-                id
-                name
-                type
-              }
-              value
-            }
-          }
-        }
-      }
-    `;
+    const todoResult = await blueCore.getTodo(bookId);
 
-    const result = await blueCore.query<{ todo: Todo }>(query, { bookId });
-
-    if (!result.success || !result.data?.todo?.children) {
-      return { success: false, error: result.error || 'Failed to fetch chapters' };
+    if (!todoResult.success || !todoResult.data?.children) {
+      return { success: false, error: todoResult.error || 'Failed to fetch chapters' };
     }
 
-    const chapters = result.data.todo.children
+    const chapters = todoResult.data.children
       .map((todo) => this.todoToChapter(todo, bookId))
       .sort((a, b) => a.position - b.position);
 
@@ -78,69 +55,41 @@ class ChaptersService {
   async createChapter(input: CreateChapterInput): Promise<ApiResponse<Chapter>> {
     const listId = await blueCore.getBooksListId();
 
-    const mutation = `
-      mutation CreateChapter($input: CreateTodoInput!) {
-        createTodo(input: $input) {
-          id
-          title
-          text
-          position
-          createdAt
-          updatedAt
-          parentId
-        }
-      }
-    `;
-
-    const result = await blueCore.query<{ createTodo: Todo }>(mutation, {
-      input: {
-        todoListId: listId,
-        title: input.title,
-        text: input.synopsis || '',
-        parentId: input.bookId,
-        position: input.position,
-      },
-    });
-
-    if (!result.success || !result.data?.createTodo) {
-      return { success: false, error: result.error || 'Failed to create chapter' };
-    }
-
-    const chapterId = result.data.createTodo.id;
-
-    // Set chapter metadata
-    // Note: split(/\s+/) on empty string returns [''], so filter to get accurate count
+    // Build chapter metadata
     const metadata: ChapterMetadata = {
       ...input.metadata,
       wordCount: input.content ? input.content.trim().split(/\s+/).filter(Boolean).length : 0,
       lastEditedAt: new Date().toISOString(),
     };
 
-    await customFieldsService.setTodoValue(
-      chapterId,
-      'BookArchitect_ChapterMetadata',
-      metadata
+    // Encode chapter data as metadata in description
+    // Store synopsis as description, metadata encoded after marker
+    const todoText = encodeMetadata(input.synopsis || '', {
+      metadata,
+      contentPreview: input.content?.substring(0, 1000),
+    });
+
+    const result = await blueCore.createTodo(
+      listId,
+      input.title,
+      todoText,
+      input.bookId // parentId
     );
 
-    // Store content preview (first 1000 chars)
-    if (input.content) {
-      await customFieldsService.setTodoValue(
-        chapterId,
-        'BookArchitect_ContentPreview',
-        input.content.substring(0, 1000)
-      );
+    if (!result.success || !result.data) {
+      return { success: false, error: result.error || 'Failed to create chapter' };
     }
 
     console.log(`[Blue.cc] Created chapter: ${input.title}`);
 
     const chapter: Chapter = {
-      id: chapterId,
+      id: result.data.id,
       bookId: input.bookId,
       title: input.title,
       synopsis: input.synopsis,
       contentPreview: input.content?.substring(0, 1000),
       metadata,
-      position: result.data.createTodo.position,
+      position: result.data.position,
     };
 
     return { success: true, data: chapter };
@@ -150,66 +99,55 @@ class ChaptersService {
    * Update a chapter
    */
   async updateChapter(input: UpdateChapterInput): Promise<ApiResponse<Chapter>> {
-    const mutation = `
-      mutation UpdateChapter($input: UpdateTodoInput!) {
-        updateTodo(input: $input) {
-          id
-          title
-          text
-          position
-          updatedAt
-          parentId
-        }
-      }
-    `;
+    // Fetch existing chapter first
+    const existingResult = await this.getChapter(input.id);
+    if (!existingResult.success || !existingResult.data) {
+      return { success: false, error: 'Chapter not found' };
+    }
 
-    const updateInput: Record<string, unknown> = { id: input.id };
-    if (input.title !== undefined) updateInput.title = input.title;
-    if (input.synopsis !== undefined) updateInput.text = input.synopsis;
-    if (input.position !== undefined) updateInput.position = input.position;
+    const existing = existingResult.data;
 
-    const result = await blueCore.query<{ updateTodo: Todo }>(mutation, {
-      input: updateInput,
+    // Merge metadata
+    const updatedMetadata: ChapterMetadata = {
+      ...existing.metadata,
+      ...input.metadata,
+      lastEditedAt: new Date().toISOString(),
+    };
+
+    // Update word count if content changed
+    if (input.content) {
+      updatedMetadata.wordCount = input.content.trim().split(/\s+/).filter(Boolean).length;
+    }
+
+    // Encode updated data
+    const todoText = encodeMetadata(input.synopsis || existing.synopsis || '', {
+      metadata: updatedMetadata,
+      contentPreview: input.content?.substring(0, 1000) || existing.contentPreview,
     });
+
+    // Build update object
+    const updateData: { title?: string; text?: string } = { text: todoText };
+    if (input.title !== undefined) {
+      updateData.title = input.title;
+    }
+
+    const result = await blueCore.updateTodo(input.id, updateData);
 
     if (!result.success) {
       return { success: false, error: result.error || 'Failed to update chapter' };
     }
 
-    // Update metadata if provided
-    if (input.metadata || input.content) {
-      const existingMetadata = await customFieldsService.getTodoValue<ChapterMetadata>(
-        input.id,
-        'BookArchitect_ChapterMetadata'
-      );
+    const chapter: Chapter = {
+      id: input.id,
+      bookId: existing.bookId,
+      title: input.title || existing.title,
+      synopsis: input.synopsis || existing.synopsis,
+      contentPreview: input.content?.substring(0, 1000) || existing.contentPreview,
+      metadata: updatedMetadata,
+      position: input.position ?? existing.position,
+    };
 
-      const updatedMetadata: ChapterMetadata = {
-        ...(existingMetadata.data || {}),
-        ...input.metadata,
-        lastEditedAt: new Date().toISOString(),
-      };
-
-      if (input.content) {
-        updatedMetadata.wordCount = input.content.trim().split(/\s+/).filter(Boolean).length;
-      }
-
-      await customFieldsService.setTodoValue(
-        input.id,
-        'BookArchitect_ChapterMetadata',
-        updatedMetadata
-      );
-    }
-
-    // Update content preview if content changed
-    if (input.content) {
-      await customFieldsService.setTodoValue(
-        input.id,
-        'BookArchitect_ContentPreview',
-        input.content.substring(0, 1000)
-      );
-    }
-
-    return this.getChapter(input.id);
+    return { success: true, data: chapter };
   }
 
   /**
@@ -244,7 +182,7 @@ class ChaptersService {
     for (let i = 0; i < chapterIds.length; i++) {
       await blueCore.query(mutation, {
         input: {
-          id: chapterIds[i],
+          todoId: chapterIds[i],
           position: i,
         },
       });
@@ -273,7 +211,7 @@ class ChaptersService {
     `;
 
     const updateInput: Record<string, unknown> = {
-      id: chapterId,
+      todoId: chapterId,
       parentId: newBookId,
     };
 
@@ -328,57 +266,62 @@ class ChaptersService {
     chapterId: string,
     fileId: string
   ): Promise<ApiResponse<void>> {
-    return customFieldsService.setTodoValue(
-      chapterId,
-      'BookArchitect_GoogleDriveFileId',
-      fileId
-    );
+    // Update chapter metadata with Google Drive file ID
+    const chapterResult = await this.getChapter(chapterId);
+    if (!chapterResult.success || !chapterResult.data) {
+      return { success: false, error: 'Chapter not found' };
+    }
+
+    const updateResult = await this.updateChapter({
+      id: chapterId,
+      metadata: {
+        ...chapterResult.data.metadata,
+        googleDriveFileId: fileId,
+      },
+    });
+
+    return { success: updateResult.success, error: updateResult.error };
   }
 
   /**
    * Get Google Drive file ID for a chapter
    */
   async getGoogleDriveFileId(chapterId: string): Promise<ApiResponse<string | null>> {
-    return customFieldsService.getTodoValue<string>(
-      chapterId,
-      'BookArchitect_GoogleDriveFileId'
-    );
+    const chapterResult = await this.getChapter(chapterId);
+    if (!chapterResult.success || !chapterResult.data) {
+      return { success: false, error: 'Chapter not found' };
+    }
+
+    return {
+      success: true,
+      data: chapterResult.data.metadata.googleDriveFileId || null,
+    };
   }
 
   /**
    * Convert a Blue.cc Todo to a Chapter
    */
   private todoToChapter(todo: Todo, bookId: string): Chapter {
-    let metadata: ChapterMetadata = {
+    // Decode metadata from todo text
+    const { description, metadata } = decodeMetadata(todo.text);
+
+    // Extract chapter metadata from decoded data
+    const chapterMetadata: ChapterMetadata = (metadata.metadata as ChapterMetadata) || {
       lastEditedAt: todo.updatedAt,
     };
 
-    let contentPreview: string | undefined;
-
-    // Extract metadata from custom fields
-    todo.customFieldValues?.forEach((cfv) => {
-      if (cfv.field.name === 'BookArchitect_ChapterMetadata') {
-        try {
-          metadata = { ...metadata, ...JSON.parse(cfv.value) };
-        } catch {
-          // Keep default metadata
-        }
-      }
-      if (cfv.field.name === 'BookArchitect_ContentPreview') {
-        contentPreview = cfv.value;
-      }
-      if (cfv.field.name === 'BookArchitect_GoogleDriveFileId') {
-        metadata.googleDriveFileId = cfv.value;
-      }
-    });
+    // Ensure lastEditedAt exists
+    if (!chapterMetadata.lastEditedAt) {
+      chapterMetadata.lastEditedAt = todo.updatedAt;
+    }
 
     return {
       id: todo.id,
       bookId,
       title: todo.title,
-      synopsis: todo.text,
-      contentPreview,
-      metadata,
+      synopsis: description || undefined,
+      contentPreview: (metadata.contentPreview as string) || undefined,
+      metadata: chapterMetadata,
       position: todo.position,
     };
   }

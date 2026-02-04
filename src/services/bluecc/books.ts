@@ -1,8 +1,9 @@
 // Blue.cc Books Service
 // CRUD operations for books stored as Blue.cc todos
+// Uses description-based metadata storage (PMT pattern) for reliable sync
 
 import blueCore from './core';
-import customFieldsService from './customFields';
+import { encodeMetadata, decodeMetadata } from './metadata';
 import type {
   ApiResponse,
   Book,
@@ -19,39 +20,17 @@ class BooksService {
   async getBooks(): Promise<ApiResponse<Book[]>> {
     const listId = await blueCore.getBooksListId();
 
-    const query = `
-      query GetBooks($listId: ID!) {
-        todos(todoListId: $listId, filter: { parentId: null }) {
-          id
-          title
-          text
-          position
-          createdAt
-          updatedAt
-          customFieldValues {
-            field {
-              id
-              name
-              type
-            }
-            value
-          }
-          children {
-            id
-            title
-            position
-          }
-        }
-      }
-    `;
+    const result = await blueCore.getTodos(listId);
 
-    const result = await blueCore.query<{ todos: Todo[] }>(query, { listId });
-
-    if (!result.success || !result.data?.todos) {
+    if (!result.success || !result.data) {
       return { success: false, error: result.error || 'Failed to fetch books' };
     }
 
-    const books = result.data.todos.map((todo) => this.todoToBook(todo));
+    // Filter to only top-level todos (books, not chapters)
+    const books = result.data
+      .filter((todo) => !todo.parentId)
+      .map((todo) => this.todoToBook(todo));
+
     return { success: true, data: books };
   }
 
@@ -75,53 +54,33 @@ class BooksService {
   async createBook(input: CreateBookInput): Promise<ApiResponse<Book>> {
     const listId = await blueCore.getBooksListId();
 
-    const mutation = `
-      mutation CreateBook($input: CreateTodoInput!) {
-        createTodo(input: $input) {
-          id
-          title
-          text
-          position
-          createdAt
-          updatedAt
-        }
-      }
-    `;
-
-    const result = await blueCore.query<{ createTodo: Todo }>(mutation, {
-      input: {
-        todoListId: listId,
-        title: input.title,
-        text: input.description || '',
-      },
-    });
-
-    if (!result.success || !result.data?.createTodo) {
-      return { success: false, error: result.error || 'Failed to create book' };
-    }
-
-    const bookId = result.data.createTodo.id;
-
-    // Set metadata custom field
+    // Build metadata
     const metadata: BookMetadata = {
       ...input.metadata,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
-    await customFieldsService.setTodoValue(
-      bookId,
-      'BookArchitect_BookMetadata',
-      metadata
-    );
+    // Encode book data as metadata in description
+    const todoText = encodeMetadata(input.description || '', {
+      metadata,
+    });
+
+    const result = await blueCore.createTodo(listId, input.title, todoText);
+
+    if (!result.success || !result.data) {
+      return { success: false, error: result.error || 'Failed to create book' };
+    }
 
     console.log(`[Blue.cc] Created book: ${input.title}`);
 
-    const book = this.todoToBook({
-      ...result.data.createTodo,
-      customFieldValues: [],
-    });
-    book.metadata = metadata;
+    const book: Book = {
+      id: result.data.id,
+      title: input.title,
+      description: input.description,
+      metadata,
+      position: result.data.position,
+    };
 
     return { success: true, data: book };
   }
@@ -130,52 +89,48 @@ class BooksService {
    * Update a book
    */
   async updateBook(input: UpdateBookInput): Promise<ApiResponse<Book>> {
-    const mutation = `
-      mutation UpdateBook($input: UpdateTodoInput!) {
-        updateTodo(input: $input) {
-          id
-          title
-          text
-          position
-          updatedAt
-        }
-      }
-    `;
+    // Fetch existing book first
+    const existingResult = await this.getBook(input.id);
+    if (!existingResult.success || !existingResult.data) {
+      return { success: false, error: 'Book not found' };
+    }
 
-    const updateInput: Record<string, unknown> = { id: input.id };
-    if (input.title !== undefined) updateInput.title = input.title;
-    if (input.description !== undefined) updateInput.text = input.description;
+    const existing = existingResult.data;
 
-    const result = await blueCore.query<{ updateTodo: Todo }>(mutation, {
-      input: updateInput,
+    // Merge metadata
+    const updatedMetadata: BookMetadata = {
+      ...existing.metadata,
+      ...input.metadata,
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Encode updated data
+    const todoText = encodeMetadata(input.description || existing.description || '', {
+      metadata: updatedMetadata,
     });
+
+    // Update todo
+    const updateData: { title?: string; text?: string } = { text: todoText };
+    if (input.title !== undefined) {
+      updateData.title = input.title;
+    }
+
+    const result = await blueCore.updateTodo(input.id, updateData);
 
     if (!result.success) {
       return { success: false, error: result.error || 'Failed to update book' };
     }
 
-    // Update metadata if provided
-    if (input.metadata) {
-      const existingMetadata = await customFieldsService.getTodoValue<BookMetadata>(
-        input.id,
-        'BookArchitect_BookMetadata'
-      );
+    const book: Book = {
+      id: input.id,
+      title: input.title || existing.title,
+      description: input.description || existing.description,
+      metadata: updatedMetadata,
+      position: existing.position,
+      chapters: existing.chapters,
+    };
 
-      const updatedMetadata: BookMetadata = {
-        ...(existingMetadata.data || {}),
-        ...input.metadata,
-        updatedAt: new Date().toISOString(),
-      } as BookMetadata;
-
-      await customFieldsService.setTodoValue(
-        input.id,
-        'BookArchitect_BookMetadata',
-        updatedMetadata
-      );
-    }
-
-    // Fetch and return updated book
-    return this.getBook(input.id);
+    return { success: true, data: book };
   }
 
   /**
@@ -207,7 +162,7 @@ class BooksService {
     for (let i = 0; i < bookIds.length; i++) {
       await blueCore.query(mutation, {
         input: {
-          id: bookIds[i],
+          todoId: bookIds[i],
           position: i,
         },
       });
@@ -252,41 +207,44 @@ class BooksService {
    * Convert a Blue.cc Todo to a Book
    */
   private todoToBook(todo: Todo): Book {
-    let metadata: BookMetadata = {
+    // Decode metadata from todo text
+    const { description, metadata } = decodeMetadata(todo.text);
+
+    // Extract book metadata from decoded data
+    const bookMetadata: BookMetadata = (metadata.metadata as BookMetadata) || {
       createdAt: todo.createdAt,
       updatedAt: todo.updatedAt,
     };
 
-    // Extract metadata from custom fields
-    const metadataField = todo.customFieldValues?.find(
-      (cfv) => cfv.field.name === 'BookArchitect_BookMetadata'
-    );
-
-    if (metadataField) {
-      try {
-        metadata = { ...metadata, ...JSON.parse(metadataField.value) };
-      } catch (error) {
-        console.warn(`[Blue.cc] Failed to parse book metadata for ${todo.id}:`, error);
-        // Keep default metadata
-      }
+    // Ensure timestamps exist
+    if (!bookMetadata.createdAt) {
+      bookMetadata.createdAt = todo.createdAt;
+    }
+    if (!bookMetadata.updatedAt) {
+      bookMetadata.updatedAt = todo.updatedAt;
     }
 
     return {
       id: todo.id,
       title: todo.title,
-      description: todo.text,
-      metadata,
+      description: description || undefined,
+      metadata: bookMetadata,
       position: todo.position,
-      // Preserve original timestamps from children instead of always using current time
-      chapters: todo.children?.map((child) => ({
-        id: child.id,
-        bookId: todo.id,
-        title: child.title,
-        position: child.position,
-        metadata: {
-          lastEditedAt: todo.updatedAt, // Use todo's updatedAt as fallback
-        },
-      })),
+      chapters: todo.children?.map((child) => {
+        // Decode chapter metadata
+        const { description: chapterDesc, metadata: chapterMeta } = decodeMetadata(child.text);
+
+        return {
+          id: child.id,
+          bookId: todo.id,
+          title: child.title,
+          synopsis: chapterDesc || undefined,
+          position: child.position,
+          metadata: (chapterMeta.metadata as { lastEditedAt?: string }) || {
+            lastEditedAt: todo.updatedAt,
+          },
+        };
+      }),
     };
   }
 

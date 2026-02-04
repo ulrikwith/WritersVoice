@@ -1,8 +1,9 @@
 // Blue.cc Voice Journey Service
 // Tracks voice development journey progress with phase transitions
+// Uses description-based metadata storage (PMT pattern) for reliable sync
 
 import blueCore from './core';
-import customFieldsService from './customFields';
+import { encodeMetadata, decodeMetadata } from './metadata';
 import type {
   ApiResponse,
   Phase,
@@ -33,7 +34,7 @@ class VoiceJourneyService {
 
     if (searchResult.success && searchResult.data && searchResult.data.length > 0) {
       const journeyTodo = searchResult.data[0];
-      const journey = await this.parseJourneyData(journeyTodo);
+      const journey = this.parseJourneyFromTodo(journeyTodo);
       journeyCache.set(userId, journey);
       return { success: true, data: journey };
     }
@@ -48,33 +49,8 @@ class VoiceJourneyService {
   async createJourney(userId: string): Promise<ApiResponse<VoiceJourneyState>> {
     const listId = await blueCore.getJourneyListId();
 
-    const mutation = `
-      mutation CreateJourney($input: CreateTodoInput!) {
-        createTodo(input: $input) {
-          id
-          title
-          createdAt
-        }
-      }
-    `;
-
-    const result = await blueCore.query<{ createTodo: { id: string } }>(mutation, {
-      input: {
-        todoListId: listId,
-        title: `Voice Journey - ${userId}`,
-        text: `Voice development journey for user ${userId}`,
-      },
-    });
-
-    if (!result.success || !result.data?.createTodo) {
-      return { success: false, error: 'Failed to create journey' };
-    }
-
-    const journeyId = result.data.createTodo.id;
-
     // Initialize journey state
     const initialState: VoiceJourneyState = {
-      id: journeyId,
       userId,
       currentPhase: 'stone',
       phaseStartDate: new Date().toISOString(),
@@ -90,10 +66,25 @@ class VoiceJourneyService {
       resonanceScores: [],
     };
 
-    // Save initial state to Blue.cc
-    await this.saveJourney(initialState);
+    // Encode journey state as metadata in description
+    const todoText = encodeMetadata(
+      `Voice Journey for user ${userId}`,
+      initialState as unknown as Record<string, unknown>
+    );
 
+    const result = await blueCore.createTodo(
+      listId,
+      `Voice Journey - ${userId}`,
+      todoText
+    );
+
+    if (!result.success || !result.data) {
+      return { success: false, error: 'Failed to create journey todo' };
+    }
+
+    initialState.id = result.data.id;
     journeyCache.set(userId, initialState);
+
     console.log(`[Blue.cc] Created voice journey for user: ${userId}`);
 
     return { success: true, data: initialState };
@@ -169,7 +160,7 @@ class VoiceJourneyService {
     return {
       success: true,
       data: journey,
-      message: 'Phase transition: Stone → Transfer. Writing now unlocked!',
+      message: 'Phase transition: Stone -> Transfer. Writing now unlocked!',
     };
   }
 
@@ -278,7 +269,7 @@ class VoiceJourneyService {
     return {
       success: true,
       data: journey,
-      message: 'Phase transition: Transfer → Application. Progressive features unlocking!',
+      message: 'Phase transition: Transfer -> Application. Progressive features unlocking!',
     };
   }
 
@@ -590,10 +581,14 @@ class VoiceJourneyService {
   }
 
   /**
-   * Parse journey data from a Blue.cc todo
+   * Parse journey data from a Blue.cc todo using metadata encoding
    */
-  private async parseJourneyData(todo: Todo): Promise<VoiceJourneyState> {
-    const journey: VoiceJourneyState = {
+  private parseJourneyFromTodo(todo: Todo): VoiceJourneyState {
+    // Decode metadata from todo text
+    const { metadata } = decodeMetadata(todo.text);
+
+    // Default journey structure
+    const defaultJourney: VoiceJourneyState = {
       id: todo.id,
       userId: '',
       currentPhase: 'stone',
@@ -606,60 +601,68 @@ class VoiceJourneyService {
         sessionDurations: [],
         recognitionNotes: [],
       },
+      unlockedFeatures: [],
+      resonanceScores: [],
     };
 
-    // Extract data from custom fields
-    for (const cfv of todo.customFieldValues || []) {
-      try {
-        if (cfv.field.name === 'VoiceJourney_Phase') {
-          // Validate phase value before assignment
-          if (this.isValidPhase(cfv.value)) {
-            journey.currentPhase = cfv.value;
-          } else {
-            console.warn(`[Blue.cc] Invalid phase value: ${cfv.value}, defaulting to 'stone'`);
-          }
-        } else if (cfv.field.name === 'VoiceJourney_Progress') {
-          const progressData = JSON.parse(cfv.value);
-          Object.assign(journey, progressData);
-        }
-      } catch (error) {
-        console.warn('[Blue.cc] Failed to parse journey custom field:', cfv.field.name, error);
-      }
+    // Merge decoded metadata with defaults
+    const journey: VoiceJourneyState = {
+      ...defaultJourney,
+      ...metadata,
+      id: todo.id, // Always use the todo ID
+    } as VoiceJourneyState;
+
+    // Validate phase
+    if (!this.isValidPhase(journey.currentPhase)) {
+      console.warn(`[Blue.cc] Invalid phase value: ${journey.currentPhase}, defaulting to 'stone'`);
+      journey.currentPhase = 'stone';
     }
 
-    // Extract userId from title
-    const match = todo.title.match(/Voice Journey - (.+)/);
-    if (match) {
-      journey.userId = match[1];
+    // Extract userId from title if not in metadata
+    if (!journey.userId) {
+      const match = todo.title.match(/Voice Journey - (.+)/);
+      if (match) {
+        journey.userId = match[1];
+      }
     }
 
     return journey;
   }
 
   /**
-   * Save journey state to Blue.cc
+   * Save journey state to Blue.cc using metadata encoding
    */
-  private async saveJourney(journey: VoiceJourneyState): Promise<void> {
+  private async saveJourney(journey: VoiceJourneyState): Promise<ApiResponse<void>> {
     if (!journey.id) {
-      throw new Error('Journey ID is required to save');
+      return { success: false, error: 'Journey ID is required to save' };
     }
 
-    // Save phase as separate field for easier querying
-    await customFieldsService.setTodoValue(
-      journey.id,
-      'VoiceJourney_Phase',
-      journey.currentPhase
-    );
+    try {
+      // Encode journey state as metadata
+      const todoText = encodeMetadata(
+        `Voice Journey for user ${journey.userId}`,
+        journey as unknown as Record<string, unknown>
+      );
 
-    // Save full progress data
-    await customFieldsService.setTodoValue(
-      journey.id,
-      'VoiceJourney_Progress',
-      journey
-    );
+      // Update the todo with new text
+      const result = await blueCore.updateTodo(journey.id, { text: todoText });
 
-    // Update cache
-    journeyCache.set(journey.userId, journey);
+      if (!result.success) {
+        console.error('[Blue.cc] Failed to save journey:', result.error);
+        return { success: false, error: result.error };
+      }
+
+      // Update cache
+      journeyCache.set(journey.userId, journey);
+
+      return { success: true };
+    } catch (error) {
+      console.error('[Blue.cc] Error saving journey:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error saving journey',
+      };
+    }
   }
 
   /**

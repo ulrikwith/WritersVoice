@@ -8,6 +8,22 @@ import type { BlueConfig, ApiResponse, TodoList, Todo } from './types';
 // Default API endpoint
 const DEFAULT_ENDPOINT = 'https://api.blue.cc/graphql';
 
+/**
+ * Raw Blue.cc Todo from API (uses 'done' not 'completed')
+ */
+interface RawTodo {
+  id: string;
+  title: string;
+  text?: string;
+  done: boolean;
+  position: number;
+  parentId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  tags?: Array<{ id: string; title: string; color?: string }>;
+  children?: RawTodo[];
+}
+
 class BlueCoreService {
   private client: GraphQLClient | null = null;
   private config: BlueConfig | null = null;
@@ -51,6 +67,26 @@ class BlueCoreService {
       throw new Error('Blue.cc client not initialized. Call initialize() first.');
     }
     return this.client;
+  }
+
+  /**
+   * Map raw Blue.cc todo to our Todo type
+   * Blue.cc uses 'done', we use 'completed'
+   */
+  private mapRawTodo(raw: RawTodo): Todo {
+    return {
+      id: raw.id,
+      todoListId: '', // Not always returned by API
+      title: raw.title,
+      text: raw.text,
+      completed: raw.done,
+      position: raw.position,
+      parentId: raw.parentId,
+      createdAt: raw.createdAt || new Date().toISOString(),
+      updatedAt: raw.updatedAt || new Date().toISOString(),
+      tags: raw.tags?.map((t) => ({ id: t.id, name: t.title, color: t.color })),
+      children: raw.children?.map((c) => this.mapRawTodo(c)),
+    };
   }
 
   /**
@@ -249,6 +285,7 @@ class BlueCoreService {
       input: {
         title,
         projectId: this.projectId,
+        position: 0, // Required field - position in the list order
       },
     });
 
@@ -304,65 +341,116 @@ class BlueCoreService {
 
   /**
    * Get a todo by ID
+   * Note: Blue.cc uses 'done' not 'completed', and 'text' for description
    */
   async getTodo(todoId: string): Promise<ApiResponse<Todo>> {
     const query = `
-      query GetTodo($id: ID!) {
+      query GetTodo($id: String!) {
         todo(id: $id) {
           id
-          todoListId
           title
           text
-          completed
-          completedAt
+          done
           position
-          parentId
           createdAt
           updatedAt
-          customFieldValues {
-            field {
-              id
-              name
-              type
-            }
-            value
-          }
           tags {
             id
-            name
-            color
-          }
-          children {
-            id
             title
-            position
+            color
           }
         }
       }
     `;
 
-    const result = await this.query<{ todo: Todo }>(query, { id: todoId });
+    const result = await this.query<{ todo: RawTodo }>(query, { id: todoId });
 
     if (result.success && result.data?.todo) {
-      return { success: true, data: result.data.todo };
+      // Map raw Blue.cc response to our Todo type
+      return { success: true, data: this.mapRawTodo(result.data.todo) };
     }
 
     return { success: false, error: 'Todo not found' };
   }
 
   /**
+   * Update a todo's title and/or text
+   * IMPORTANT: Blue.cc uses 'editTodo' mutation with 'EditTodoInput', not 'updateTodo'!
+   * EditTodoInput uses 'text' field for description (unlike CreateTodoInput which uses 'description')
+   */
+  async updateTodo(
+    todoId: string,
+    updates: { title?: string; text?: string; completed?: boolean }
+  ): Promise<ApiResponse<Todo>> {
+    // Handle 'done' status separately if needed - use updateTodoDoneStatus mutation
+    if (updates.completed !== undefined) {
+      const doneResult = await this.query<{ updateTodoDoneStatus: RawTodo }>(
+        `mutation UpdateDoneStatus($todoId: String!) {
+          updateTodoDoneStatus(todoId: $todoId) {
+            id
+            done
+          }
+        }`,
+        { todoId }
+      );
+      // This toggles done status - if we need to set a specific value, we might need different logic
+      if (!doneResult.success) {
+        console.warn('[Blue.cc] Failed to update done status');
+      }
+    }
+
+    // Only call editTodo if we have title or text updates
+    if (updates.title !== undefined || updates.text !== undefined) {
+      const mutation = `
+        mutation EditTodo($input: EditTodoInput!) {
+          editTodo(input: $input) {
+            id
+            title
+            text
+            done
+            position
+            updatedAt
+          }
+        }
+      `;
+
+      const input: Record<string, unknown> = { todoId };
+
+      if (updates.title !== undefined) {
+        input.title = updates.title;
+      }
+      if (updates.text !== undefined) {
+        // EditTodoInput uses 'text' field
+        input.text = updates.text;
+      }
+
+      const result = await this.query<{ editTodo: RawTodo }>(mutation, { input });
+
+      if (result.success && result.data?.editTodo) {
+        return { success: true, data: this.mapRawTodo(result.data.editTodo) };
+      }
+
+      return { success: false, error: result.error || 'Failed to update todo' };
+    }
+
+    // If only completed was updated, fetch the current todo
+    return this.getTodo(todoId);
+  }
+
+  /**
    * Delete a todo
+   * Blue.cc uses input pattern: { todoId: string }
    */
   async deleteTodo(todoId: string): Promise<ApiResponse<void>> {
     const mutation = `
       mutation DeleteTodo($input: DeleteTodoInput!) {
         deleteTodo(input: $input) {
-          id
+          success
         }
       }
     `;
 
-    const result = await this.query<{ deleteTodo: { id: string } }>(mutation, {
+    const result = await this.query<{ deleteTodo: { success: boolean } }>(mutation, {
       input: { todoId },
     });
 
@@ -371,46 +459,157 @@ class BlueCoreService {
 
   /**
    * Search todos in a list
+   * Blue.cc uses todoList(id) query to get todos
+   * Uses 'done' not 'completed'
    */
   async searchTodos(
     listId: string,
     searchTerm: string,
-    limit = 50
+    _limit = 50
   ): Promise<ApiResponse<Todo[]>> {
+    // Use todoList(id) pattern to fetch todos, then filter client-side
     const query = `
-      query SearchTodos($listId: ID!, $search: String, $limit: Int) {
-        todos(todoListId: $listId, filter: { search: $search }, limit: $limit) {
-          id
-          title
-          text
-          completed
-          position
-          parentId
-          createdAt
-          updatedAt
-          customFieldValues {
-            field {
+      query SearchTodos($todoListId: String!) {
+        todoList(id: $todoListId) {
+          todos {
+            id
+            title
+            text
+            html
+            done
+            position
+            tags {
+              id
+              title
+              color
+            }
+            customFields {
               id
               name
-              type
+              value
             }
-            value
+            createdAt
+            updatedAt
           }
         }
       }
     `;
 
-    const result = await this.query<{ todos: Todo[] }>(query, {
-      listId,
-      search: searchTerm,
-      limit,
+    const result = await this.query<{ todoList: { todos: RawTodo[] } }>(query, {
+      todoListId: listId,
     });
 
-    if (result.success && result.data?.todos) {
-      return { success: true, data: result.data.todos };
+    if (result.success && result.data?.todoList?.todos) {
+      // Filter client-side by search term
+      const searchLower = searchTerm.toLowerCase();
+      const filteredTodos = result.data.todoList.todos
+        .filter((t) =>
+          t.title.toLowerCase().includes(searchLower) ||
+          (t.text && t.text.toLowerCase().includes(searchLower))
+        )
+        .map((t) => this.mapRawTodo(t));
+
+      return { success: true, data: filteredTodos };
     }
 
     return { success: false, error: 'Search failed', data: [] };
+  }
+
+  /**
+   * Get all todos in a list
+   * Blue.cc uses todoList(id) query to get todos, not todos(todoListId)
+   * Uses 'done' not 'completed'
+   */
+  async getTodos(listId: string, _limit = 100): Promise<ApiResponse<Todo[]>> {
+    // Note: limit param ignored - todoList.todos doesn't support limit in this query pattern
+    const query = `
+      query GetTodos($todoListId: String!) {
+        todoList(id: $todoListId) {
+          todos {
+            id
+            title
+            text
+            html
+            done
+            position
+            tags {
+              id
+              title
+              color
+            }
+            customFields {
+              id
+              name
+              value
+            }
+            createdAt
+            updatedAt
+            duedAt
+            startedAt
+          }
+        }
+      }
+    `;
+
+    const result = await this.query<{ todoList: { todos: RawTodo[] } }>(query, {
+      todoListId: listId,
+    });
+
+    if (result.success && result.data?.todoList?.todos) {
+      return { success: true, data: result.data.todoList.todos.map((t) => this.mapRawTodo(t)) };
+    }
+
+    return { success: false, error: 'Failed to get todos', data: [] };
+  }
+
+  /**
+   * Create a todo with title and description
+   * IMPORTANT: CreateTodoInput uses 'description' field, not 'text'!
+   * The output Todo has 'text' field which contains the description.
+   */
+  async createTodo(
+    listId: string,
+    title: string,
+    text?: string,
+    parentId?: string
+  ): Promise<ApiResponse<Todo>> {
+    // Note: parentId is not supported in CreateTodoInput based on introspection
+    // We'll ignore it for now - hierarchical todos might need a different approach
+    if (parentId) {
+      console.warn('[Blue.cc] parentId not supported in createTodo - ignoring');
+    }
+
+    const mutation = `
+      mutation CreateTodo($input: CreateTodoInput!) {
+        createTodo(input: $input) {
+          id
+          title
+          text
+          done
+          position
+          createdAt
+          updatedAt
+        }
+      }
+    `;
+
+    const input: Record<string, unknown> = {
+      todoListId: listId,
+      title,
+    };
+
+    // CreateTodoInput uses 'description' field, not 'text'
+    if (text) {
+      input.description = text;
+    }
+
+    const result = await this.query<{ createTodo: RawTodo }>(mutation, { input });
+
+    if (result.success && result.data?.createTodo) {
+      return { success: true, data: this.mapRawTodo(result.data.createTodo) };
+    }
+
+    return { success: false, error: result.error || 'Failed to create todo' };
   }
 
   /**

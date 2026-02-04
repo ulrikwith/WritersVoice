@@ -107,8 +107,8 @@ export const useBlueStore = create<BlueState>()(
             throw new Error(workspaceResult.error || 'Failed to connect to workspace');
           }
 
-          // Ensure custom fields exist
-          await blueClient.customFields.ensureBookArchitectFields();
+          // Note: Custom fields initialization removed - using description-based metadata storage instead
+          // This eliminates GraphQL validation errors with Blue.cc's custom fields API
 
           // Check connection and get user ID
           const connectionResult = await blueClient.core.checkConnection();
